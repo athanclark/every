@@ -9,8 +9,8 @@ module Control.Concurrent.Async.Every where
 import Data.Maybe (fromMaybe)
 import Control.Monad (forever)
 import Control.Exception (Exception, catch)
-import Control.Concurrent (threadDelay)
-import Control.Concurrent.Async (async, Async, cancelWith)
+import Control.Concurrent (ThreadId, forkIO, threadDelay, throwTo)
+import Control.Concurrent.Async (async, Async, cancelWith, asyncThreadId)
 import Control.Concurrent.STM (atomically)
 import Control.Concurrent.STM.TVar (newTVarIO, readTVar, writeTVar)
 import Control.Concurrent.STM.TChan (TChan, newTChanIO, readTChan, writeTChan)
@@ -22,33 +22,31 @@ import GHC.Generics (Generic)
 every :: Int -- ^ time difference in microseconds
       -> Maybe Int -- ^ initial delay before first invocation
       -> IO a
-      -> IO (Async a)
-every interDelay mInitDelay =
-  let timeToDelay soFar
-        | soFar == 0 = fromMaybe 0 mInitDelay
-        | otherwise  = interDelay
-  in  everyFunc timeToDelay
+      -> IO ThreadId
+every interDelay mInitDelay x = do
+  let timeToDelay _ = interDelay
+  threadDelay $ fromMaybe 0 mInitDelay
+  everyFunc timeToDelay x
 
 
 everyForking :: Int
              -> Maybe Int
              -> IO a
-             -> IO (Async (), TChan (Async a))
-everyForking interDelay mInitDelay =
-  let timeToDelay soFar
-        | soFar == 0 = fromMaybe 0 mInitDelay
-        | otherwise  = interDelay
-  in  everyFuncForking timeToDelay
+             -> IO (ThreadId, TChan (Async a))
+everyForking interDelay mInitDelay x = do
+  let timeToDelay _ = interDelay
+  threadDelay $ fromMaybe 0 mInitDelay
+  everyFuncForking timeToDelay x
 
 
 everyFunc :: forall a
            . (Int -> Int) -- ^ function from total time spent, to the time to delay from /now/
           -> IO a
-          -> IO (Async a)
+          -> IO ThreadId
 everyFunc timeToDelay x = do
   totalTimeSpent <- newTVarIO 0
-  async $
-    let thread = forever $ do
+  forkIO $
+    let thread = do
           x
           toGo <- atomically $ do
             soFar <- readTVar totalTimeSpent
@@ -56,10 +54,11 @@ everyFunc timeToDelay x = do
             writeTVar totalTimeSpent (soFar + toGo')
             pure toGo'
           threadDelay toGo
-        resetter :: EveryException -> IO a
+          thread `catch` resetter
+        resetter :: EveryException -> IO ()
         resetter (EveryExceptionReset mThreadDelay) = do
           threadDelay $ fromMaybe 0 mThreadDelay
-          thread
+          thread `catch` resetter
     in  thread `catch` resetter
 
 
@@ -67,7 +66,7 @@ everyFunc timeToDelay x = do
 everyFuncForking :: forall a
                   . (Int -> Int)
                  -> IO a
-                 -> IO (Async (), TChan (Async a))
+                 -> IO (ThreadId, TChan (Async a))
 everyFuncForking timeToDelay x = do
   forkedChan <- newTChanIO
   mainThread <- everyFunc timeToDelay $ do
@@ -76,8 +75,8 @@ everyFuncForking timeToDelay x = do
   pure (mainThread,forkedChan)
 
 
-reset :: Maybe Int -> Async a -> IO ()
-reset mDelay chan = cancelWith chan (EveryExceptionReset mDelay)
+reset :: Maybe Int -> ThreadId -> IO ()
+reset mDelay thread = throwTo thread (EveryExceptionReset mDelay)
 
 
 data EveryException = EveryExceptionReset (Maybe Int)

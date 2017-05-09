@@ -1,5 +1,5 @@
 name:                every
-version:             0.0.0
+version:             0.0.1
 synopsis:            Run a process every so often.
 -- description:
 homepage:            https://github.com/athanclark/every#readme
